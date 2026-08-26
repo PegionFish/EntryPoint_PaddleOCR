@@ -1,0 +1,92 @@
+[module]
+id = "paddleocr"
+name = "PaddleOCR 文字识别"
+version = "2.9.0"
+description = "基于 PaddlePaddle 的多语言 OCR，支持检测+识别+方向分类与 PP-StructureV3 文档理解"
+category = "ocr"
+genre = "paddleocr"
+authors = ["EntryPoint Community"]
+license = "Apache-2.0"
+homepage = "https://github.com/PaddlePaddle/PaddleOCR"
+tags = ["ocr", "text-recognition", "multilingual", "chinese"]
+
+[runtime]
+type = "python"
+python_version = ">=3.10,<3.13"
+requirements = "requirements.txt"
+entrypoint = "adapter.py"
+start_command = "{venv_python} {MODULE_DIR}/{entrypoint}"
+
+[compute]
+backends = ["cuda", "cpu"]
+default_backend = "cuda"
+vram_estimate_mb = 1024
+min_vram_mb = 512
+
+[compute.env]
+cuda = { CUDA_VISIBLE_DEVICES = "{device_index}" }
+
+[[models]]
+id = "v4-chinese"
+name = "PP-OCRv4 中文 (推荐)"
+source = "url"
+url = "auto"
+target_dir = "paddleocr-v4-chinese"
+size_estimate_mb = 200
+default = true
+
+[[models]]
+id = "v4-multilingual"
+name = "PP-OCRv4 多语言"
+source = "url"
+url = "auto"
+target_dir = "paddleocr-v4-multilingual"
+size_estimate_mb = 200
+
+# PP-StructureV3 文档理解模型集（W2 由本地导入落位：zip
+# PP-StructureV3-gpu-offline/models/ → <models_cache>/paddleocr-pp-structure-v3/
+# 原子目录：layout/region/doc_ori/doc_unwarping/ocr_det/ocr_rec/formula/
+# chart(table_*)/textline_orientation，共 14 个子模型；chart 内部为
+# PP-Chart2Table）。source=local_import：平台按「存在即就绪」处理，不下载。
+# doc_understand 由 adapter 从该 target_dir 解析，与 recognize 激活变体无关。
+[[models]]
+id = "pp-structure-v3"
+name = "PP-StructureV3 文档理解（本地导入）"
+source = "local_import"
+target_dir = "paddleocr-pp-structure-v3"
+size_estimate_mb = 3138
+
+[interface]
+type = "http"
+health_endpoint = "/health"
+ready_timeout_secs = 60
+
+[[interface.capabilities]]
+name = "recognize"
+description = "图片文字识别，返回文本+坐标+置信度"
+input_type = "image"
+output_type = "json"
+max_file_size_mb = 20
+
+[interface.capabilities.params]
+lang = { type = "string", default = "ch", description = "语言 (ch/en/japan/korean 等)" }
+use_angle_cls = { type = "boolean", default = true, description = "启用文字方向分类" }
+det_db_thresh = { type = "float", default = 0.3, min = 0.0, max = 1.0, step = 0.05, description = "检测阈值" }
+
+# doc_understand：PP-StructureV3 文档理解（图片/PDF → Markdown），
+# 模型集为独立变体 pp-structure-v3（target_dir = paddleocr-pp-structure-v3）
+[[interface.capabilities]]
+name = "doc_understand"
+description = "文档理解：版面/表格/公式/图表解析 → Markdown（图片或 PDF；PDF 按 dpi 逐页渲染；分支分派不侵入 recognize）"
+input_type = "image"
+output_type = "json"
+max_file_size_mb = 100
+
+[interface.capabilities.params]
+doc_orientation = { type = "boolean", default = false, description = "文档方向分类（慢）" }
+doc_unwarping = { type = "boolean", default = false, description = "文档去扭曲（慢）" }
+table = { type = "boolean", default = true, description = "表格结构识别" }
+formula = { type = "boolean", default = true, description = "公式识别(LaTeX)" }
+chart = { type = "boolean", default = false, description = "图表识别(转入表格；paddlex 3.4.3 官方 bug，开启暂不可用)" }
+dpi = { type = "integer", default = 300, min = 150, max = 600, description = "PDF→图片 DPI" }
+output_format = { type = "select", options = ["json", "md"], default = "json", description = "json=markdown+页面原始结构；md=纯 Markdown（配合 output_path 产出文件）" }
