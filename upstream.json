@@ -1,7 +1,7 @@
 {
-  "upstream": "https",
+  "upstream": "https://github.com/PaddlePaddle/PaddleOCR",
   "module_id": "paddleocr",
-  "module_name": "//github.com/PaddlePaddle/PaddleOCR:PaddleOCR 文字识别",
+  "module_name": "PaddleOCR 文字识别",
   "module_version": "2.9.0",
   "adapted_from": "https://github.com/PegionFish/EntryPoint",
   "entrypoint_commit": "d74d40f1",
