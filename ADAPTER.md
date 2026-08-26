@@ -4,6 +4,7 @@
 [PaddleOCR 文字识别](https://github.com/PaddlePaddle/PaddleOCR) 的适配层镜像，反向同步自主仓库。
 
 - 同步自: https://github.com/PegionFish/EntryPoint（source commit: `d74d40f1`，2026-08-26）
+- GitHub 插件 repo: https://github.com/PegionFish/EntryPoint_PaddleOCR
 - 上游: https://github.com/PaddlePaddle/PaddleOCR
 - 主仓库对应目录: modules/paddleocr
 - 同步工具: scripts/sync-model-repos.sh
@@ -25,7 +26,6 @@
 # 从主仓库刷新
 > /home/bob/EntryPoint/scripts/sync-model-repos.sh --only paddleocr
 
-# 推送 GitHub（origin 自建）
-git remote add origin git@github.com:<you>/paddleocr.git
+# 推送 GitHub
 git push -u origin main
 ```
