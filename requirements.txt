@@ -1,10 +1,14 @@
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
-# PP-StructureV3 doc_understand + 普通 recognize 共用：
+# PP-StructureV3 doc_understand + 普通 recognize + T-45 新变体（v5-chinese /
+# paddleocr-vl）共用一套 pin，不拆 venv：
 # paddleocr/paddlex 版本对齐源 zip（PP-StructureV3-gpu-offline 内置 3.4 系）；
 # paddleocr>=3.7 的 PPStructureV3 不再接受 model_dir kwargs（A2 契约即 3.4 签名），
 # 故锁 3.4.x，缺失即 DependencyError/Unknown argument。
+# T-45 依赖口径：paddleocr 3.4.x 自带 PaddleOCRVL 管线（v1=VL-0.9B）；VL 原生
+# 后端需 paddlepaddle>=3.2.1（下行 >=3.0 上界内已满足）与 safetensors（由
+# paddlex[ocr] 3.4.x extras 自带）——均无需新增依赖行；v5 变体无新依赖。
 paddleocr==3.4.*
 paddlex[ocr]==3.4.*
 paddlepaddle>=3.0,<4

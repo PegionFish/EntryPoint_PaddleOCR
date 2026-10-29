@@ -8,6 +8,12 @@ Targeting paddleocr 3.x (paddlex pipeline): constructor uses `device` /
 `use_textline_orientation` (2.x `use_gpu` / `use_angle_cls` / `show_log` are
 rejected with "Unknown argument"); results are OCRResult dicts with
 `rec_texts` / `rec_scores` / `rec_polys`.
+
+T-45 变体：
+* v5 系变体（EP_MODEL_ID=v5-chinese）→ 显式 pin PP-OCRv5_server_* 模型名
+  （防上游默认漂移：paddleocr 3.7 起默认切 PP-OCRv6）。
+* PaddleOCR-VL 0.9B（local_import 变体 paddleocr-vl）→ /predict/doc_vl，
+  PaddleOCRVL(pipeline_version="v1", vl_rec_backend="native")。
 """
 
 from __future__ import annotations
@@ -43,10 +49,11 @@ EP_PORT = int(os.getenv("EP_PORT", "8000"))
 EP_BACKEND = os.getenv("EP_BACKEND", "cpu").lower()
 EP_MODEL_DIR = os.getenv("EP_MODEL_DIR", "")
 EP_MODELS_ROOT = os.getenv("EP_MODELS_ROOT", "")
+EP_MODEL_ID = os.getenv("EP_MODEL_ID", "")
 EP_DEVICE_INDEX = os.getenv("EP_DEVICE_INDEX", "0")
 
 MODULE_ID = "paddleocr"
-MODULE_VERSION = "2.9.0"
+MODULE_VERSION = "2.10.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +107,44 @@ class _EpProgress:
 _ocr_engine: Any = None
 _ocr_engine_lang: str | None = None
 _ocr_engine_angle_cls: bool | None = None
+_ocr_engine_variant: str | None = None
+
+# T-45 变体 → 显式检测/识别模型名 pin。显式 pin 的意义：上游默认会漂移
+# （paddleocr 3.4 的 url=auto 路径默认即 PP-OCRv5_server_*；3.7 起默认切
+# PP-OCRv6_medium_*），pin 死后 v5 变体身份不受上游版本影响。v4 变体不在此
+# 表内（行为不变：3.4 下 auto 即 v5 server，历史口径见 CONTRACT §2）。
+_VARIANT_MODEL_NAMES: dict[str, tuple[str, str]] = {
+    "v5-chinese": ("PP-OCRv5_server_det", "PP-OCRv5_server_rec"),
+}
+
+
+def _read_model_name(model_dir: Path) -> str:
+    """从模型目录的 inference.yml 读 Global.model_name（缺失/解析失败返回空串）。
+
+    paddlex 3.4 校验 model_name 与目录内 inference.yml 一致（不一致抛
+    "Model name mismatch"），故手动落位的 det/rec 目录必须连同其声明的
+    模型名一并传入——否则 3.4 默认名（PP-OCRv5_server_*）会撞 v4 目录。
+    """
+    yml = model_dir / "inference.yml"
+    if not yml.is_file():
+        return ""
+    try:
+        text = yml.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        import yaml
+
+        data = yaml.safe_load(text)
+        name = (data or {}).get("Global", {}).get("model_name", "")
+        return str(name or "")
+    except Exception:
+        # yaml 不可用/解析失败：退化到单行匹配
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("model_name:"):
+                return stripped.split(":", 1)[1].strip().strip("'\"")
+        return ""
 
 
 def _get_ocr(lang: str = "ch", use_angle_cls: bool = True, det_db_thresh: float = 0.3):
@@ -108,8 +153,12 @@ def _get_ocr(lang: str = "ch", use_angle_cls: bool = True, det_db_thresh: float 
     3.x API 适配：`use_gpu` → `device`；`use_angle_cls` →
     `use_textline_orientation`；`show_log` 移除（日志走标准 logging）；
     `det_db_thresh` 语义最接近的 3.x 参数为 `text_det_box_thresh`。
+
+    T-45：激活变体为 v5 系（EP_MODEL_ID 命中 _VARIANT_MODEL_NAMES）时显式
+    指定 PP-OCRv5 模型名；EP_MODEL_DIR 下的 det/rec/cls 子目录（手动落位）
+    优先级高于模型名（与 v4 同一套接线）。
     """
-    global _ocr_engine, _ocr_engine_lang, _ocr_engine_angle_cls
+    global _ocr_engine, _ocr_engine_lang, _ocr_engine_angle_cls, _ocr_engine_variant
 
     device = "cpu"
     if EP_BACKEND == "cuda":
@@ -119,19 +168,23 @@ def _get_ocr(lang: str = "ch", use_angle_cls: bool = True, det_db_thresh: float 
         except (TypeError, ValueError):
             device = "gpu"
 
+    variant = EP_MODEL_ID if EP_MODEL_ID in _VARIANT_MODEL_NAMES else ""
+
     if (
         _ocr_engine is not None
         and _ocr_engine_lang == lang
         and _ocr_engine_angle_cls == use_angle_cls
+        and _ocr_engine_variant == variant
     ):
         return _ocr_engine
 
     logger.info(
-        "Initialising PaddleOCR 3.x  lang=%s  textline_orientation=%s  device=%s  box_thresh=%.2f",
+        "Initialising PaddleOCR 3.x  lang=%s  textline_orientation=%s  device=%s  box_thresh=%.2f  variant=%s",
         lang,
         use_angle_cls,
         device,
         det_db_thresh,
+        variant or "(default)",
     )
 
     from paddleocr import PaddleOCR  # heavy import – keep lazy
@@ -144,6 +197,10 @@ def _get_ocr(lang: str = "ch", use_angle_cls: bool = True, det_db_thresh: float 
         use_doc_unwarping=False,
         device=device,
     )
+    if variant:
+        det_name, rec_name = _VARIANT_MODEL_NAMES[variant]
+        kwargs["text_detection_model_name"] = det_name
+        kwargs["text_recognition_model_name"] = rec_name
     try:
         if 0.0 <= float(det_db_thresh) <= 1.0:
             kwargs["text_det_box_thresh"] = float(det_db_thresh)
@@ -153,20 +210,31 @@ def _get_ocr(lang: str = "ch", use_angle_cls: bool = True, det_db_thresh: float 
     # Point to pre-downloaded model directory when provided.
     # 3.x 参数名：text_detection_model_dir / text_recognition_model_dir /
     # textline_orientation_model_dir（旧布局 cls/ 映射到行方向分类模型）。
+    # 目录与声明模型名成对传入（paddlex 3.4 一致性校验，见 _read_model_name）。
     if EP_MODEL_DIR and Path(EP_MODEL_DIR).is_dir():
         det_dir = Path(EP_MODEL_DIR) / "det"
         rec_dir = Path(EP_MODEL_DIR) / "rec"
         cls_dir = Path(EP_MODEL_DIR) / "cls"
         if det_dir.is_dir():
             kwargs["text_detection_model_dir"] = str(det_dir)
+            name = _read_model_name(det_dir)
+            if name:
+                kwargs["text_detection_model_name"] = name
         if rec_dir.is_dir():
             kwargs["text_recognition_model_dir"] = str(rec_dir)
+            name = _read_model_name(rec_dir)
+            if name:
+                kwargs["text_recognition_model_name"] = name
         if cls_dir.is_dir():
             kwargs["textline_orientation_model_dir"] = str(cls_dir)
+            name = _read_model_name(cls_dir)
+            if name:
+                kwargs["textline_orientation_model_name"] = name
 
     _ocr_engine = PaddleOCR(**kwargs)
     _ocr_engine_lang = lang
     _ocr_engine_angle_cls = use_angle_cls
+    _ocr_engine_variant = variant
     logger.info("PaddleOCR engine ready")
     return _ocr_engine
 
@@ -439,7 +507,10 @@ def _pdf_to_pngs(pdf_path: str, dpi: int, out_dir: Path) -> list[Path]:
 
 
 def _extract_markdown(res: Any) -> str:
-    """按源 app.py 的官方提取方式取 markdown（res.markdown 为 dict）。"""
+    """按源 app.py 的官方提取方式取 markdown（res.markdown 为 dict）。
+
+    PaddleOCR-VL（T-45）的 markdown dict 键为 text/page_texts，同样在此处理。
+    """
     md: Any = None
     try:
         if isinstance(res, dict):
@@ -454,7 +525,9 @@ def _extract_markdown(res: Any) -> str:
     if isinstance(md, dict):
         text = md.get("text")
         if not text:
-            text = md.get("markdown_texts", "")
+            text = md.get("markdown_texts")
+        if not text:
+            text = md.get("page_texts")
         if isinstance(text, list):
             return "\n\n".join(str(t) for t in text if str(t).strip())
         return str(text or "")
@@ -652,6 +725,298 @@ def _as_list(value: Any) -> list:
 
 
 # ---------------------------------------------------------------------------
+# PaddleOCR-VL document understanding (doc_vl, T-45)
+# ---------------------------------------------------------------------------
+# PaddleOCR-VL 0.9B（Apache-2.0）：NaViT 动态分辨率视觉编码 + ERNIE-4.5-0.3B
+# 解码，端到端文档解析 → Markdown。paddleocr 3.4.x 的 PaddleOCRVL 管线
+# （pipeline_version="v1" = VL-0.9B + PP-DocLayoutV2 版面模型）。
+#
+# 模型落位（source=local_import，沿 pp-structure-v3 先例「存在即就绪」）：
+#   <models_cache>/paddleocr-vl-0.9b/
+#     PP-DocLayoutV2/            ← paddle 推理格式版面模型（config.json +
+#                                  inference.pdiparams + inference.pdmodel）
+#     PaddleOCR-VL-0.9B/ 或 vl/  ← HF 格式 0.9B 权重（config.json +
+#                                  model.safetensors + tokenizer* 等）
+#   或平铺：<root>/model.safetensors + <root>/PP-DocLayoutV2/。
+# 目录探测一律不硬编码文件名（复用 _looks_like_model_dir / safetensors 探测）；
+# 缺失时 503 MODEL_NOT_LOADED，不静默联网下载。
+#
+# 运行时口径（诚实声明，详见 CONTRACT §4）：
+#   * 原生后端官方要求 GPU 计算能力 ≥ 7.0（vLLM/SGLang/FastDeploy ≥ 8.0）——
+#     Tesla P4（Pascal，sm_61）不满足，P4 上仅 CPU 路径可行（慢）；
+#   * paddlepaddle 3.x GPU 轮子本身不支持 Pascal → 本模块在 P4 上 CPU 实测。
+
+PVL_TARGET_DIR = "paddleocr-vl-0.9b"
+PVL_MAX_FILE_SIZE_MB = 100
+PVL_MAX_PDF_PAGES = 50
+
+# 版面模型目录候选名（ModelScope 仓原名优先，短别名兼容）
+_PVL_LAYOUT_DIRS = ("PP-DocLayoutV2", "layout")
+# VL 权重目录候选名（平铺在根目录时为 None 位）
+_PVL_VL_SUBDIRS = ("PaddleOCR-VL-0.9B", "vl")
+
+
+class PvlNotReadyError(RuntimeError):
+    """PaddleOCR-VL 模型目录未就绪：返回 503 而非静默下载。"""
+
+
+def _looks_like_vl_dir(path: Path) -> bool:
+    """探测目录是否含 VL 权重（HF safetensors，原生后端经 convert_from_hf 装载）。"""
+    try:
+        if (path / "model.safetensors").is_file():
+            return True
+        return any(path.glob("*.safetensors"))
+    except OSError:
+        return False
+
+
+def _probe_vl_dirs(root: Path) -> tuple[Path, Path] | None:
+    """在 <root> 下探测（版面模型目录, VL 权重目录），未齐则 None。
+
+    版面：root/<PP-DocLayoutV2|layout>/（顶层即 paddle 产物，或取第一个
+    内部模型目录——与 pp-structure-v3 的 _probe_submodel_dir 同策略）。
+    VL：root 平铺（含 model.safetensors）或 root/<PaddleOCR-VL-0.9B|vl>/。
+    """
+    layout_dir: Path | None = None
+    for name in _PVL_LAYOUT_DIRS:
+        top = root / name
+        if top.is_dir():
+            if _looks_like_model_dir(top):
+                layout_dir = top
+                break
+            try:
+                entries = sorted(
+                    e for e in os.listdir(top)
+                    if not e.startswith(".") and e != ".cache"
+                )
+            except OSError:
+                continue
+            for child_name in entries:
+                child = top / child_name
+                if child.is_dir() and _looks_like_model_dir(child):
+                    layout_dir = child
+                    break
+            if layout_dir is not None:
+                break
+
+    vl_dir: Path | None = None
+    if _looks_like_vl_dir(root):
+        vl_dir = root
+    else:
+        for name in _PVL_VL_SUBDIRS:
+            cand = root / name
+            if cand.is_dir() and _looks_like_vl_dir(cand):
+                vl_dir = cand
+                break
+
+    if layout_dir is None or vl_dir is None:
+        return None
+    return layout_dir, vl_dir
+
+
+def _resolve_vl_model_root() -> tuple[Path, Path, Path] | None:
+    """定位 PaddleOCR-VL 模型根目录，返回 (root, layout_dir, vl_dir)。
+
+    优先级：<EP_MODELS_ROOT>/<PVL_TARGET_DIR>（契约位）→ 激活变体目录
+    EP_MODEL_DIR（当激活的恰是 paddleocr-vl 变体）。
+    """
+    candidates = []
+    if EP_MODELS_ROOT:
+        candidates.append(Path(EP_MODELS_ROOT) / PVL_TARGET_DIR)
+    if EP_MODEL_DIR:
+        candidates.append(Path(EP_MODEL_DIR))
+    for cand in candidates:
+        probed = _probe_vl_dirs(cand)
+        if probed is not None:
+            return cand, probed[0], probed[1]
+    return None
+
+
+_vl_engine: Any = None
+_vl_lock = threading.Lock()
+
+
+def _get_vl() -> Any:
+    """Return a cached PaddleOCRVL pipeline built from the local model dirs."""
+    global _vl_engine
+
+    if _vl_engine is not None:
+        return _vl_engine
+
+    with _vl_lock:
+        if _vl_engine is not None:
+            return _vl_engine
+
+        resolved = _resolve_vl_model_root()
+        if resolved is None:
+            raise PvlNotReadyError(
+                f"PaddleOCR-VL 模型目录未就绪: 预期 <models_cache>/{PVL_TARGET_DIR}/"
+                "（PP-DocLayoutV2/ 版面模型 + PaddleOCR-VL-0.9B/（或 vl/，或根目录平铺）"
+                "HF 权重含 model.safetensors）。请经平台模型管理「本地导入」或切换激活"
+                "变体为 paddleocr-vl 后重启模块。"
+            )
+        root, layout_dir, vl_dir = resolved
+
+        device = "cpu"
+        if EP_BACKEND == "cuda":
+            try:
+                device = f"gpu:{int(EP_DEVICE_INDEX)}"
+            except (TypeError, ValueError):
+                device = "gpu"
+
+        try:
+            from paddleocr import PaddleOCRVL
+        except Exception as exc:
+            raise RuntimeError(
+                "paddleocr 3.4.x（PaddleOCRVL/paddlex）依赖未就绪，见 CONTRACT「依赖口径」: "
+                f"{exc}"
+            ) from exc
+
+        logger.info(
+            "Initialising PaddleOCRVL pipeline  device=%s  root=%s  layout=%s  vl=%s",
+            device,
+            root,
+            layout_dir.name,
+            vl_dir.name,
+        )
+        _vl_engine = PaddleOCRVL(
+            pipeline_version="v1",
+            layout_detection_model_dir=str(layout_dir),
+            vl_rec_model_dir=str(vl_dir),
+            vl_rec_backend="native",
+            device=device,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+        )
+        logger.info("PaddleOCRVL pipeline ready (%s)", root)
+        return _vl_engine
+
+
+def _run_doc_vl(input_path: str, params: dict | None) -> dict:
+    """PaddleOCR-VL 文档理解主分派：按扩展名分派（pdf→逐页渲染，image→单页）。
+
+    params（冻结契约）：doc_orientation/doc_unwarping/dpi/output_format
+    （+执行器注入的 output_path，MODULE_SPEC §5 文件产物模式）。
+    """
+    src = Path(input_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    params = params or {}
+    suffix = src.suffix.lower()
+    is_pdf = suffix == ".pdf"
+    if not is_pdf and suffix not in (
+        ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff",
+    ):
+        raise ValueError(
+            f"doc_vl 仅支持图片（PNG/JPG/BMP/WEBP/TIF）或 PDF，收到: {suffix}"
+        )
+
+    dpi = _clamp_dpi(params.get("dpi", 300))
+    switches = {
+        "doc_orientation": bool(params.get("doc_orientation", False)),
+        "doc_unwarping": bool(params.get("doc_unwarping", False)),
+    }
+
+    progress = _EpProgress()
+    if _vl_engine is None:
+        progress.report(0, "paddleocr-vl pipeline build")
+    engine = _get_vl()
+    progress.report(8, "paddleocr-vl pipeline ready")
+
+    workdir = Path(tempfile.mkdtemp(prefix="ep_docvl_"))
+    try:
+        if is_pdf:
+            page_images = _pdf_to_pngs(str(src), dpi, workdir)
+            if not page_images:
+                raise ValueError("PDF 未渲染出任何页面（文件是否损坏/为空？）")
+            if len(page_images) > PVL_MAX_PDF_PAGES:
+                raise ValueError(
+                    f"PDF 页数超过上限 {PVL_MAX_PDF_PAGES}（实际 "
+                    f"{len(page_images)}），请降低页数后重试。"
+                )
+        else:
+            page_images = [src]
+
+        md_parts: list[str] = []
+        pages: list[dict] = []
+        for idx, img in enumerate(page_images, start=1):
+            output = engine.predict(
+                input=str(img),
+                use_doc_orientation_classify=switches["doc_orientation"],
+                use_doc_unwarping=switches["doc_unwarping"],
+            )
+            page_md: list[str] = []
+            structures: list[Any] = []
+            for res in _as_list(output):
+                md = _extract_markdown(res)
+                if md:
+                    page_md.append(md)
+                structure = _extract_result_json(res)
+                if structure is not None:
+                    structures.append(structure)
+            page_text = "\n\n".join(page_md)
+            md_parts.append(page_text)
+            pages.append(
+                {
+                    "index": idx,
+                    "requested": str(img) if str(img) != str(src) else "input",
+                    "markdown": page_text,
+                    "structure": structures if structures else None,
+                }
+            )
+            logger.info(
+                "doc_vl page %d/%d done (md %d chars)",
+                idx, len(page_images), len(page_text),
+            )
+            progress.report(
+                8 + (idx * 90) // len(page_images),
+                f"page {idx}/{len(page_images)}",
+            )
+
+        progress.report(100, "doc_vl done")
+        md_full = "\n\n".join(part for part in md_parts if part).rstrip()
+        payload = {
+            "markdown": md_full,
+            "pages": pages,
+            "input": {
+                "path": str(src),
+                "kind": "pdf" if is_pdf else "image",
+                "pages": len(page_images),
+                "dpi": dpi if is_pdf else None,
+            },
+            "options": dict(switches),
+        }
+        # ── 文件产物模式（MODULE_SPEC §5：执行器注入 output_path）──
+        output_format = str(params.get("output_format") or "json").strip().lower()
+        output_path = params.get("output_path")
+        if output_format == "md" and output_path:
+            p = Path(str(output_path))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(md_full, encoding="utf-8")
+            logger.info("doc_vl markdown written to %s", p)
+            return {
+                "status": "completed",
+                "output_type": "file",
+                "result": str(p),
+                "output_path": str(p),
+            }
+        if output_format == "md":
+            return {
+                "status": "completed",
+                "output_type": "text",
+                "result": md_full,
+            }
+        return {
+            "status": "completed",
+            "output_type": "json",
+            "result": payload,
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -720,6 +1085,22 @@ async def info():
                     "table": {"type": "boolean", "default": True},
                     "formula": {"type": "boolean", "default": True},
                     "chart": {"type": "boolean", "default": True},
+                    "dpi": {"type": "integer", "default": 300, "min": 150, "max": 600},
+                    "output_format": {
+                        "type": "select",
+                        "options": ["json", "md"],
+                        "default": "json",
+                    },
+                },
+            },
+            {
+                "name": "doc_vl",
+                "description": "PaddleOCR-VL 0.9B 端到端文档理解 → Markdown（本地导入模型；原生后端 GPU 需计算能力 ≥7.0，P4 上仅 CPU）",
+                "input_type": "image",
+                "output_type": "json",
+                "params": {
+                    "doc_orientation": {"type": "boolean", "default": False},
+                    "doc_unwarping": {"type": "boolean", "default": False},
                     "dpi": {"type": "integer", "default": 300, "min": 150, "max": 600},
                     "output_format": {
                         "type": "select",
@@ -1048,6 +1429,103 @@ async def predict_doc_understand(
 
 
 # ---------------------------------------------------------------------------
+# doc_vl endpoint (PaddleOCR-VL, T-45)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/predict/doc_vl")
+async def predict_doc_vl(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    input_path_form: Optional[str] = Form(None, alias="input_path"),
+    params_form: Optional[str] = Form(None, alias="params"),
+):
+    """PaddleOCR-VL 0.9B 文档理解：图片/PDF → Markdown（与 doc_understand 同契约）。
+
+    模型为独立变体 paddleocr-vl（target_dir = paddleocr-vl-0.9b，local_import
+    本地导入落位）；未落位时 503 MODEL_NOT_LOADED，不静默联网下载。
+    """
+    tmp_path: str | None = None
+    params = _parse_params(params_form)
+
+    try:
+        content_type = request.headers.get("content-type", "")
+        input_path: str | None = None
+        if "application/json" in content_type:
+            body = await request.json()
+            params.update(_parse_params(body.get("params")))
+            input_path = body.get("input_path")
+            if not input_path:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Provide either a multipart 'file' upload or an 'input_path' field.",
+                )
+        elif file is not None and file.filename:
+            suffix = Path(file.filename).suffix or ".png"
+            fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="ep_docvl_")
+            os.close(fd)
+            with open(tmp_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            input_path = tmp_path
+        elif input_path_form:
+            input_path = input_path_form
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide either a multipart 'file' upload or an 'input_path' field.",
+            )
+
+        if not Path(input_path).is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Input file not found: {input_path}",
+            )
+
+        file_size_mb = Path(input_path).stat().st_size / (1024 * 1024)
+        if file_size_mb > PVL_MAX_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({file_size_mb:.1f} MB). "
+                    f"Maximum is {PVL_MAX_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        result = _run_doc_vl(input_path, params)
+        return JSONResponse(content=result)
+
+    except PvlNotReadyError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error_code": "MODEL_NOT_LOADED",
+                "message": "PaddleOCR-VL model not ready",
+                "detail": str(exc),
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("doc_vl failed: %s\n%s", exc, traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error_code": "INFERENCE_ERROR",
+                "message": "doc_vl inference failed",
+                "detail": str(exc),
+            },
+        )
+    finally:
+        if tmp_path and Path(tmp_path).exists():
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Startup: pre-warm the engine
 # ---------------------------------------------------------------------------
 
@@ -1068,13 +1546,22 @@ async def _startup():
             "Engine pre-warm failed (will retry on first request):\n%s",
             traceback.format_exc(),
         )
-    # doc_understand 引擎较重，不在启动期加载；仅探测模型目录就绪状态
+    # doc_understand / doc_vl 引擎较重，不在启动期加载；仅探测模型目录就绪状态
     try:
         pps3_root = _resolve_pps3_model_root()
         if pps3_root is not None:
             logger.info(
                 "PP-StructureV3 model root ready: %s (loads on first doc_understand call)",
                 pps3_root,
+            )
+    except OSError:
+        pass
+    try:
+        vl_resolved = _resolve_vl_model_root()
+        if vl_resolved is not None:
+            logger.info(
+                "PaddleOCR-VL model root ready: %s (loads on first doc_vl call)",
+                vl_resolved[0],
             )
     except OSError:
         pass

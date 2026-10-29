@@ -1,7 +1,7 @@
 [module]
 id = "paddleocr"
 name = "PaddleOCR 文字识别"
-version = "2.9.0"
+version = "2.10.0"
 description = "基于 PaddlePaddle 的多语言 OCR，支持检测+识别+方向分类与 PP-StructureV3 文档理解"
 category = "ocr"
 genre = "paddleocr"
@@ -56,6 +56,35 @@ source = "local_import"
 target_dir = "paddleocr-pp-structure-v3"
 size_estimate_mb = 3138
 
+# T-45：PP-OCRv5 变体。url=auto 沿 v4 变体口径（模块自管，paddleocr 从 BOS
+# 官方源单模型拉取，国内 CDN 直达）；手动落位口径（ModelScope 单文件直链）
+# 见 CONTRACT §3 / README「模型获取」。adapter 按 EP_MODEL_ID 显式 pin
+# PP-OCRv5_server_det / PP-OCRv5_server_rec 模型名——上游默认会漂移
+# （paddleocr 3.7 起默认 PP-OCRv6_medium），pin 死变体身份。
+[[models]]
+id = "v5-chinese"
+name = "PP-OCRv5 中文 server（高精度）"
+source = "url"
+url = "auto"
+target_dir = "paddleocr-v5-chinese"
+size_estimate_mb = 200
+
+# T-45：PaddleOCR-VL 0.9B 文档理解（Apache-2.0）。source=local_import 沿
+# pp-structure-v3 先例：存在即就绪，不自动下载（0.9B 权重 ~2.2GB，ModelScope
+# 单文件直链清单见 CONTRACT §3 / README）。落位结构：
+#   <models_cache>/paddleocr-vl-0.9b/PP-DocLayoutV2/（版面，paddle 格式）
+#   <models_cache>/paddleocr-vl-0.9b/PaddleOCR-VL-0.9B/（或 vl/，或根目录平铺
+#   model.safetensors；HF 格式，原生后端 convert_from_hf 装载）
+# 运行时口径：原生后端 GPU 需计算能力 ≥7.0（vLLM/SGLang ≥8.0）；paddlepaddle
+# 3.x GPU 轮子不支持 Pascal——Tesla P4 上仅 CPU 路径（实测见 CONTRACT §4），
+# GPU 档位待 CC≥7.0 真机验证。
+[[models]]
+id = "paddleocr-vl"
+name = "PaddleOCR-VL 0.9B 文档理解（本地导入）"
+source = "local_import"
+target_dir = "paddleocr-vl-0.9b"
+size_estimate_mb = 2200
+
 [interface]
 type = "http"
 health_endpoint = "/health"
@@ -88,5 +117,21 @@ doc_unwarping = { type = "boolean", default = false, description = "文档去扭
 table = { type = "boolean", default = true, description = "表格结构识别" }
 formula = { type = "boolean", default = true, description = "公式识别(LaTeX)" }
 chart = { type = "boolean", default = false, description = "图表识别(转入表格；paddlex 3.4.3 官方 bug，开启暂不可用)" }
+dpi = { type = "integer", default = 300, min = 150, max = 600, description = "PDF→图片 DPI" }
+output_format = { type = "select", options = ["json", "md"], default = "json", description = "json=markdown+页面原始结构；md=纯 Markdown（配合 output_path 产出文件）" }
+
+# doc_vl：PaddleOCR-VL 0.9B 端到端文档理解（图片/PDF → Markdown）。
+# 模型集为独立变体 paddleocr-vl（target_dir = paddleocr-vl-0.9b，本地导入）。
+# 与 doc_understand 互不侵入；解析由 VL 端到端完成，无 table/formula/chart 分开关。
+[[interface.capabilities]]
+name = "doc_vl"
+description = "PaddleOCR-VL 0.9B 文档理解：端到端版面+识别 → Markdown（图片或 PDF；本地导入模型；原生后端 GPU 需计算能力 ≥7.0，P4 上仅 CPU）"
+input_type = "image"
+output_type = "json"
+max_file_size_mb = 100
+
+[interface.capabilities.params]
+doc_orientation = { type = "boolean", default = false, description = "文档方向分类（慢）" }
+doc_unwarping = { type = "boolean", default = false, description = "文档去扭曲（慢）" }
 dpi = { type = "integer", default = 300, min = 150, max = 600, description = "PDF→图片 DPI" }
 output_format = { type = "select", options = ["json", "md"], default = "json", description = "json=markdown+页面原始结构；md=纯 Markdown（配合 output_path 产出文件）" }
